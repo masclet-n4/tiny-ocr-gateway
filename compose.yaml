@@ -1,0 +1,10 @@
+services:
+  ocr-front:
+    build: .
+    env_file:
+      - .env
+    environment:
+      PORT: "3001"
+    ports:
+      - "${OCR_FRONT_PORT:-3001}:3001"
+    restart: unless-stopped
