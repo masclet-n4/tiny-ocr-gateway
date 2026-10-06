@@ -1,54 +1,85 @@
-# ocr-front
+# tiny-ocr-gateway
 
-Interfaz Vue 3 mobile-first servida por Bun para probar extracción de texto OCR e interpretación de PDFs con un JSON Schema. El gateway también ofrece la API genérica para otros servicios.
+Gateway Bun con interfaz Vue para extraer texto OCR e interpretar PDFs mediante un JSON Schema. Coordina `tiny-ocr` y `ai-interpreter`, consulta PocketBase y genera URLs firmadas de RustFS para descargar resultados.
 
-## Estructura
+## Requisitos
 
-- frontend/: interfaz Vue y configuración Vite.
-- `backend/`: servidor Bun, proxy OCR, coordinación de jobs y firma de URLs RustFS.
-- dist/: build de frontend que Bun sirve en producción.
+- Bun 1.3.14 o compatible.
+- Node.js y pnpm para instalar dependencias y compilar el frontend (la imagen usa Node 22 y pnpm 12).
+- Los servicios PocketBase y RustFS; para las funciones OCR e interpretación, también `tiny-ocr` y `ai-interpreter`.
+- Credenciales válidas de RustFS y el bucket configurado ya creado.
 
-## Desarrollo
+## Configuración
 
-Copia .env.example a .env y configura RustFS. Asegúrate de que Python OCR responde en OCR_BASE_URL (por defecto puerto 3000). Instala dependencias con pnpm install y ejecuta en dos terminales:
+Crea `.env` desde el ejemplo. Bun carga las variables para el servidor automáticamente:
 
-- bun run dev:server
-- bun run dev
+```sh
+cp .env.example .env
+```
 
-Vite queda en el puerto 5174 y reenvía las rutas al servidor Bun en el 3001.
+| Variable | Valor en `.env.example` / defecto | Uso |
+|---|---|---|
+| `PORT` | `3001` | Puerto HTTP del servidor; Compose también lo fija en `3001`. |
+| `HOST` | `0.0.0.0` | Interfaz de red donde escucha el servidor. |
+| `OCR_FRONT_PORT` | `3001` | Puerto del host publicado por Compose. |
+| `OCR_BASE_URL` | `http://localhost:3000` | URL base de `tiny-ocr`. |
+| `INTERPRETER_BASE_URL` | `http://localhost:3002` | URL base de `ai-interpreter`. |
+| `PB_URL` | `http://localhost:8090` | PocketBase para el estado de los jobs. |
+| `RUSTFS_ENDPOINT` | `http://localhost:9000` | Endpoint S3 de RustFS; obligatorio para firmar descargas. |
+| `RUSTFS_BUCKET` | `ocr-results` | Bucket de resultados; debe existir. |
+| `RUSTFS_ACCESS_KEY` | `change-me` | Credencial de RustFS; reemplázala. |
+| `RUSTFS_SECRET_KEY` | `change-me` | Secreto de RustFS; reemplázalo. |
+| `RUSTFS_REGION` | `us-east-1` | Región S3. |
+| `RUSTFS_URL_EXPIRES_SECONDS` | `300` | Vigencia de las URLs firmadas, de 1 a 604800 segundos. |
 
+Si ejecutas el servicio en Docker junto con el workspace, usa las direcciones internas configuradas en el `compose.yaml` raíz. `RUSTFS_ENDPOINT` debe ser accesible también desde quien descarga la URL firmada.
 
-## Interfaz de pruebas
+## Ejecución en desarrollo
 
-En la interfaz del gateway puedes elegir **Extraer texto** o **Obtener JSON**, subir un PDF y, para la segunda opción, pegar o cargar un archivo `.json` con el schema. La pantalla sigue el job, permite consultar jobs anteriores y ofrece la descarga del `.txt` o `.json` al terminar.
+Desde este directorio, instala dependencias:
 
-## Producción
+```sh
+pnpm install
+```
 
-- pnpm build
-- bun run start
+Arranca el servidor Bun y Vite en dos terminales:
 
+```sh
+bun run dev:server
+pnpm dev
+```
 
-## Docker Compose
+La interfaz queda en <http://localhost:5174> y reenvía las rutas al servidor en el puerto 3001.
 
-Copia .env.example a .env y configura las variables necesarias para este servicio.
+## Ejecución con Docker
 
-- docker compose up --build -d
-- docker compose logs -f ocr-front
-- docker compose down
+El Compose de este repositorio levanta solo el gateway; los otros servicios deben estar disponibles en las URLs configuradas:
 
-El puerto publicado por defecto es 3001; puedes cambiarlo definiendo OCR_FRONT_PORT en .env. Las credenciales se leen desde .env al arrancar y no se incluyen en la imagen.
+```sh
+docker compose up --build -d
+docker compose logs -f ocr-front
+docker compose down
+```
 
-Bun conserva las rutas Python /alive, /ocr/* y /jobs/* sin transformar sus respuestas. /download/:job_id consulta el job, firma un GET de RustFS con result_key y redirige a la URL temporal.
+El workspace completo se levanta desde el directorio raíz con `docker compose up --build -d`.
 
+## Interfaz y API
 
-## API de interpretación
+La interfaz permite subir un PDF para **Extraer texto** o **Obtener JSON**. Para obtener JSON, proporciona un JSON Schema. La pantalla sigue el job y permite descargar el resultado cuando termina.
 
-- `POST /interpret/async` (`multipart/form-data`): campos `file` (PDF) y `schema` (JSON Schema serializado). Devuelve `202 { "job_id": ... }`.
-- `GET /interpret/jobs/:job_id`: estado/fase del flujo; al completar incluye `result_url`.
-- `GET /interpret/jobs/:job_id/result`: redirige a una URL firmada para descargar el JSON desde RustFS.
+- `GET /alive`, `/ocr/*` y `/jobs/*` — se reenvían al servicio OCR.
+- `GET /download/{job_id}` — redirige a una URL firmada para descargar el texto OCR.
+- `POST /interpret/async` — recibe `file` (PDF) y `schema` (JSON Schema serializado); devuelve `202 { "job_id": ... }`.
+- `GET /interpret/jobs/{job_id}` — consulta estado y fase; al terminar incluye `result_url`.
+- `GET /interpret/jobs/{job_id}/result` — redirige a la descarga del JSON desde RustFS.
 
-El gateway coordina el job OCR, pasa al servicio `interpreter` una URL temporal firmada del texto, guarda el JSON validado en `RUSTFS_BUCKET/interpretations/:job_id.json` y actualiza el job de PocketBase. El servicio caller decide dónde persistir el resultado. Los jobs que estaban activos al arrancar el gateway se marcan `stopped`; no se reanudan.
+El estado de los jobs se guarda en PocketBase; el JSON de interpretación se guarda en `interpretations/` dentro del bucket. Los jobs de interpretación que estaban activos cuando arranca el gateway se marcan como `stopped`; no se reanudan.
 
-Variables: `PORT`, `HOST`, `OCR_BASE_URL`, `INTERPRETER_BASE_URL`, `PB_URL`, `RUSTFS_ENDPOINT`, `RUSTFS_BUCKET`, `RUSTFS_ACCESS_KEY`, `RUSTFS_SECRET_KEY`, `RUSTFS_REGION` y `RUSTFS_URL_EXPIRES_SECONDS`. La URL firmada debe ser accesible desde el interpretador y, para el JSON final, desde el servicio cliente.
+## Pruebas
 
-Verificaciones locales: `pnpm build`, `bun test` y `cd ../interpreter && bun test`. La integración real con OCR, PocketBase, RustFS y OpenRouter requiere configurar esos servicios.
+```sh
+pnpm build
+bun test
+```
+
+La integración completa requiere PocketBase, RustFS, `tiny-ocr` y `ai-interpreter` en ejecución.
