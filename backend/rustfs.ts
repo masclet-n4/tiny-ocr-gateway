@@ -1,7 +1,7 @@
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 
-let s3Client: S3Client | undefined
+let s3Client: { endpoint: string; accessKeyId: string; secretAccessKey: string; region: string; client: S3Client } | undefined
 
 export function getResultKey(job: unknown): string | null {
   if (!job || typeof job !== 'object') throw new Error('Respuesta de job no válida')
@@ -16,8 +16,6 @@ export function getResultKey(job: unknown): string | null {
 }
 
 function getS3Client(): S3Client {
-  if (s3Client) return s3Client
-
   const endpoint = process.env.RUSTFS_ENDPOINT
   const accessKeyId = process.env.RUSTFS_ACCESS_KEY
   const secretAccessKey = process.env.RUSTFS_SECRET_KEY
@@ -25,16 +23,23 @@ function getS3Client(): S3Client {
     throw new Error('Falta configurar el endpoint o las credenciales de RustFS')
   }
 
-  s3Client = new S3Client({
+  const region = process.env.RUSTFS_REGION ?? 'us-east-1'
+  if (s3Client?.endpoint === endpoint && s3Client.accessKeyId === accessKeyId
+    && s3Client.secretAccessKey === secretAccessKey && s3Client.region === region) {
+    return s3Client.client
+  }
+
+  const client = new S3Client({
     endpoint,
-    region: process.env.RUSTFS_REGION ?? 'us-east-1',
+    region,
     forcePathStyle: true,
     credentials: { accessKeyId, secretAccessKey },
   })
-  return s3Client
+  s3Client = { endpoint, accessKeyId, secretAccessKey, region, client }
+  return client
 }
 
-export async function presignResult(key: string): Promise<string> {
+async function presignObject(key: string, contentType: string, filename: string): Promise<string> {
   const bucket = process.env.RUSTFS_BUCKET
   if (!bucket) throw new Error('Falta configurar RUSTFS_BUCKET')
   const expiresIn = Number(process.env.RUSTFS_URL_EXPIRES_SECONDS ?? 300)
@@ -47,9 +52,33 @@ export async function presignResult(key: string): Promise<string> {
     new GetObjectCommand({
       Bucket: bucket,
       Key: key,
-      ResponseContentType: 'text/plain; charset=utf-8',
-      ResponseContentDisposition: 'attachment; filename="ocr-result.txt"',
+      ResponseContentType: contentType,
+      ResponseContentDisposition: 'attachment; filename="' + filename + '"',
     }),
     { expiresIn },
   )
+}
+
+export function presignResult(key: string): Promise<string> {
+  return presignObject(key, 'text/plain; charset=utf-8', 'ocr-result.txt')
+}
+
+export function presignJsonResult(key: string): Promise<string> {
+  return presignObject(key, 'application/json; charset=utf-8', 'interpretation.json')
+}
+
+export async function saveInterpretationResult(jobId: string, result: unknown): Promise<string> {
+  const bucket = process.env.RUSTFS_BUCKET
+  if (!bucket) throw new Error('Falta configurar RUSTFS_BUCKET')
+  const key = 'interpretations/' + jobId + '.json'
+  const body = JSON.stringify(result)
+  if (body === undefined) throw new Error('El resultado no se puede serializar a JSON')
+
+  await getS3Client().send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: body,
+    ContentType: 'application/json; charset=utf-8',
+  }))
+  return key
 }

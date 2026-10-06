@@ -1,6 +1,7 @@
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fetchOcrJob, forwardedHeaders, isOcrPath, proxyToOcr } from './ocr-proxy.js'
 import { getResultKey, presignResult } from './rustfs.js'
+import { getInterpretationResult, getInterpretationStatus, stopInterruptedInterpretationJobs, submitInterpretation } from './interpretation.js'
 
 const PORT = Number(process.env.PORT ?? 3001)
 const DIST_DIR = resolve(import.meta.dir, '../dist')
@@ -68,6 +69,29 @@ async function serveStatic(request: Request, url: URL): Promise<Response> {
 export async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url)
 
+  if (url.pathname === '/interpret/async') {
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'POST' } })
+    }
+    return submitInterpretation(request)
+  }
+
+  const interpretationResult = /^\/interpret\/jobs\/([a-z0-9]{15})\/result$/.exec(url.pathname)
+  if (interpretationResult) {
+    if (request.method !== 'GET') {
+      return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'GET' } })
+    }
+    return getInterpretationResult(interpretationResult[1])
+  }
+
+  const interpretationJob = /^\/interpret\/jobs\/([a-z0-9]{15})$/.exec(url.pathname)
+  if (interpretationJob) {
+    if (request.method !== 'GET') {
+      return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'GET' } })
+    }
+    return getInterpretationStatus(interpretationJob[1])
+  }
+
   if (url.pathname.startsWith('/download/')) {
     if (request.method !== 'GET') {
       return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'GET' } })
@@ -82,11 +106,18 @@ export async function handleRequest(request: Request): Promise<Response> {
 }
 
 if (import.meta.main) {
+  try {
+    await stopInterruptedInterpretationJobs()
+  } catch (error) {
+    console.error('Could not mark interrupted interpretation jobs:', error)
+  }
+
   const server = Bun.serve({
     port: PORT,
     hostname: process.env.HOST ?? '0.0.0.0',
     fetch(request, server) {
-      if (isOcrPath(new URL(request.url).pathname)) server.timeout(request, 255)
+      const pathname = new URL(request.url).pathname
+      if (isOcrPath(pathname) || pathname === '/interpret/async') server.timeout(request, 255)
       return handleRequest(request)
     },
   })

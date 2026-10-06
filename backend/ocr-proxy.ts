@@ -63,3 +63,14 @@ export async function proxyToOcr(request: Request, url: URL): Promise<Response> 
 export function fetchOcrJob(jobId: string, signal: AbortSignal): Promise<Response> {
   return fetch(ocrBaseUrl() + '/jobs/' + encodeURIComponent(jobId), { signal })
 }
+
+
+export function startOcrJob(file: File): Promise<Response> {
+  const form = new FormData()
+  form.append('file', file, file.name || 'document.pdf')
+  return fetch(ocrBaseUrl() + '/ocr/async', {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(255_000),
+  })
+}
