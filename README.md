@@ -1,4 +1,4 @@
-# tiny-ocr-gateway
+# tiny-ocr-gateway 
 
 Gateway Bun con interfaz Vue para extraer texto OCR e interpretar PDFs mediante un JSON Schema. Coordina `tiny-ocr` y `ai-interpreter`, consulta PocketBase y genera URLs firmadas de RustFS para descargar resultados.
 
