@@ -34,6 +34,15 @@ class InputError extends Error {
   }
 }
 
+class InterpretationError extends Error {
+  readonly usage?: OpenRouterUsage
+
+  constructor(message: string, usage?: OpenRouterUsage) {
+    super(message)
+    this.usage = usage
+  }
+}
+
 function interpreterBaseUrl(): string {
   return (process.env.INTERPRETER_BASE_URL ?? 'http://localhost:3002').replace(/\/+$/, '')
 }
@@ -200,7 +209,10 @@ async function interpret(textUrl: string, schema: unknown, jobId: string): Promi
   const payload = await response.json().catch(() => null) as { detail?: unknown; result?: unknown; usage?: unknown } | null
   if (!response.ok) {
     const detail = typeof payload?.detail === 'string' ? payload.detail : 'HTTP ' + response.status
-    throw new Error('Interpretador: ' + detail)
+    const usage = payload?.usage && typeof payload.usage === 'object' && !Array.isArray(payload.usage)
+      ? usageSummary(payload.usage)
+      : undefined
+    throw new InterpretationError('Interpretador: ' + detail, usage)
   }
   if (!payload || !Object.hasOwn(payload, 'result') || !Object.hasOwn(payload, 'usage')) {
     throw new Error('El interpretador no devolvió result y tokens/coste')
@@ -214,9 +226,11 @@ async function runInterpretationJob(
   ocrJobId: string,
   schema: unknown,
 ): Promise<void> {
+  let failureDetails = details
   try {
     const textKey = await waitForOcrResult(ocrJobId)
     const interpretingDetails = { ...details, phase: 'interpreting' }
+    failureDetails = interpretingDetails
     await updateInterpretationJob(jobId, { status: 'processing', details: interpretingDetails })
 
     const textUrl = await presignResult(textKey)
@@ -230,7 +244,10 @@ async function runInterpretationJob(
     })
   } catch (error) {
     console.error('Interpretation job failed:', jobId, errorMessage(error))
-    await failJob(jobId, details, error)
+    if (error instanceof InterpretationError && error.usage) {
+      failureDetails = { ...failureDetails, openrouter_usage: error.usage }
+    }
+    await failJob(jobId, failureDetails, error)
   }
 }
 

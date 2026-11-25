@@ -17,17 +17,76 @@ export class PocketBaseError extends Error {
   }
 }
 
+type AuthConfig = { base: string; email: string; password: string }
+type AuthToken = { token: string; expiresAt: number }
+
+let cachedAuth: (AuthConfig & AuthToken) | undefined
+let pendingAuth: (AuthConfig & { promise: Promise<AuthToken> }) | undefined
+
+function baseUrl(): string {
+  return (process.env.PB_URL ?? 'http://localhost:8090').replace(/\/+$/, '')
+}
+
 function collectionUrl(): string {
-  const base = (process.env.PB_URL ?? 'http://localhost:8090').replace(/\/+$/, '')
-  return base + '/api/collections/jobs/records'
+  return baseUrl() + '/api/collections/jobs/records'
+}
+
+function sameConfig(a: AuthConfig, b: AuthConfig): boolean {
+  return a.base === b.base && a.email === b.email && a.password === b.password
+}
+
+async function authenticate(config: AuthConfig): Promise<AuthToken> {
+  let response: Response
+  try {
+    response = await fetch(config.base + '/api/collections/service_accounts/auth-with-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identity: config.email, password: config.password }),
+      signal: AbortSignal.timeout(10_000),
+    })
+  } catch {
+    throw new PocketBaseError(503, 'PocketBase no está disponible')
+  }
+  if (!response.ok) throw new PocketBaseError(503, 'No se pudo autenticar con PocketBase')
+
+  const payload = await response.json().catch(() => null) as { token?: unknown } | null
+  const token = payload?.token
+  try {
+    if (typeof token !== 'string' || token.split('.').length !== 3) throw new Error()
+    const decoded = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')) as { exp?: unknown }
+    if (typeof decoded.exp !== 'number' || !Number.isFinite(decoded.exp)) throw new Error()
+    const expiresAt = decoded.exp * 1000 - 60_000
+    if (expiresAt <= Date.now()) throw new Error()
+    return { token, expiresAt }
+  } catch {
+    throw new PocketBaseError(503, 'PocketBase no devolvió un token válido')
+  }
+}
+
+async function authToken(): Promise<string> {
+  const config = { base: baseUrl(), email: process.env.PB_EMAIL ?? '', password: process.env.PB_PASSWORD ?? '' }
+  if (!config.email || !config.password) throw new PocketBaseError(503, 'Faltan PB_EMAIL o PB_PASSWORD')
+  if (cachedAuth && sameConfig(cachedAuth, config) && Date.now() < cachedAuth.expiresAt) return cachedAuth.token
+  if (pendingAuth && sameConfig(pendingAuth, config)) return (await pendingAuth.promise).token
+
+  const pending = { ...config, promise: authenticate(config) }
+  pendingAuth = pending
+  try {
+    const auth = await pending.promise
+    if (pendingAuth === pending) cachedAuth = { ...config, ...auth }
+    return auth.token
+  } finally {
+    if (pendingAuth === pending) pendingAuth = undefined
+  }
 }
 
 async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const token = await authToken()
   let response: Response
   try {
     response = await fetch(url, {
       ...init,
-      headers: { 'Content-Type': 'application/json', ...init.headers },
+      headers: { 'Content-Type': 'application/json', ...init.headers, Authorization: token },
       signal: AbortSignal.timeout(10_000),
     })
   } catch {

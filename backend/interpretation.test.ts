@@ -2,8 +2,12 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { handleRequest } from './server.js'
 import { stopInterruptedInterpretationJobs } from './interpretation.js'
 
+const testToken = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.signature`
+
 const originalEnv = {
   PB_URL: process.env.PB_URL,
+  PB_EMAIL: process.env.PB_EMAIL,
+  PB_PASSWORD: process.env.PB_PASSWORD,
   OCR_BASE_URL: process.env.OCR_BASE_URL,
   INTERPRETER_BASE_URL: process.env.INTERPRETER_BASE_URL,
   RUSTFS_ENDPOINT: process.env.RUSTFS_ENDPOINT,
@@ -25,6 +29,7 @@ describe('gateway interpretation pipeline', () => {
   it('coordinates OCR and interpretation, stores JSON and serves a signed result link', async () => {
     const parentJobId = 'interpjob123456'
     let parentJob: Record<string, unknown> | null = null
+    let interpreterFails = false
     let savedKey = ''
     let savedBody = ''
     const pb = Bun.serve({
@@ -33,6 +38,10 @@ describe('gateway interpretation pipeline', () => {
       async fetch(request) {
         const url = new URL(request.url)
         const basePath = '/api/collections/jobs/records'
+        if (url.pathname === '/api/collections/service_accounts/auth-with-password' && request.method === 'POST') {
+          return Response.json({ token: testToken })
+        }
+        if (request.headers.get('Authorization') !== testToken) return new Response(null, { status: 403 })
         if (url.pathname === basePath && request.method === 'POST') {
           parentJob = { id: parentJobId, ...await request.json() as Record<string, unknown> }
           return Response.json(parentJob)
@@ -73,6 +82,12 @@ describe('gateway interpretation pipeline', () => {
           const body = await request.json() as { text_url?: string; schema?: unknown }
           expect(body.text_url).toContain('/ocr-results/ocrjob123456789.txt')
           expect(request.headers.get('x-job-id')).toBe(parentJobId)
+          if (interpreterFails) {
+            return Response.json({
+              detail: 'OpenRouter no devolvió una respuesta completa',
+              usage: { cost: 0.0025, prompt_tokens: 100, completion_tokens: 4096, total_tokens: 4196 },
+            }, { status: 502 })
+          }
           return Response.json({
             result: { title: 'Ada' },
             usage: {
@@ -102,6 +117,8 @@ describe('gateway interpretation pipeline', () => {
 
     Object.assign(process.env, {
       PB_URL: pb.url.origin,
+      PB_EMAIL: 'test@example.com',
+      PB_PASSWORD: 'test-password',
       OCR_BASE_URL: ocr.url.origin,
       INTERPRETER_BASE_URL: interpreter.url.origin,
       RUSTFS_ENDPOINT: rustfs.url.origin,
@@ -148,6 +165,26 @@ describe('gateway interpretation pipeline', () => {
       })
       expect(storedDetails).not.toHaveProperty('openrouter')
       expect(storedDetails.openrouter_usage).not.toHaveProperty('prompt_tokens_details')
+
+      interpreterFails = true
+      const failedAccepted = await handleRequest(new Request('http://gateway.local/interpret/async', { method: 'POST', body: form }))
+      expect(failedAccepted.status).toBe(202)
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const response = await handleRequest(new Request('http://gateway.local/interpret/jobs/' + parentJobId))
+        job = await response.json() as Record<string, unknown>
+        if (job.status === 'error') break
+        await Bun.sleep(10)
+      }
+      expect(job.status).toBe('error')
+      const failedStoredJob = parentJob as unknown as Record<string, unknown>
+      const failedDetails = failedStoredJob.details as Record<string, unknown>
+      expect(failedDetails.openrouter_usage).toEqual({
+        cost: 0.0025,
+        prompt_tokens: 100,
+        completion_tokens: 4096,
+        total_tokens: 4196,
+      })
+      expect((failedStoredJob.errors as Record<string, unknown>).message).toContain('respuesta completa')
     } finally {
       pb.stop(true)
       ocr.stop(true)
@@ -173,6 +210,10 @@ describe('gateway interpretation pipeline', () => {
       async fetch(request) {
         const url = new URL(request.url)
         const basePath = '/api/collections/jobs/records'
+        if (url.pathname === '/api/collections/service_accounts/auth-with-password' && request.method === 'POST') {
+          return Response.json({ token: testToken })
+        }
+        if (request.headers.get('Authorization') !== testToken) return new Response(null, { status: 403 })
         if (url.pathname === basePath && request.method === 'GET') {
           expect(url.searchParams.get('filter')).toContain('interpretation')
           return Response.json({ items: [state.record], totalPages: 1 })
@@ -185,6 +226,8 @@ describe('gateway interpretation pipeline', () => {
       },
     })
     process.env.PB_URL = pb.url.origin
+    process.env.PB_EMAIL = 'test@example.com'
+    process.env.PB_PASSWORD = 'test-password'
 
     try {
       await stopInterruptedInterpretationJobs()

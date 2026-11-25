@@ -25,6 +25,8 @@ cp .env.example .env
 | `OCR_BASE_URL` | `http://localhost:3000` | URL base de `tiny-ocr`. |
 | `INTERPRETER_BASE_URL` | `http://localhost:3002` | URL base de `ai-interpreter`. |
 | `PB_URL` | `http://localhost:8090` | PocketBase para el estado de los jobs. |
+| `PB_EMAIL` | Vacío | Correo de la cuenta técnica de PocketBase. |
+| `PB_PASSWORD` | Vacío | Contraseña de la cuenta técnica de PocketBase; no versionar. |
 | `RUSTFS_ENDPOINT` | `http://localhost:9000` | Endpoint S3 de RustFS; obligatorio para firmar descargas. |
 | `RUSTFS_BUCKET` | `ocr-results` | Bucket de resultados; debe existir. |
 | `RUSTFS_ACCESS_KEY` | `change-me` | Credencial de RustFS; reemplázala. |
